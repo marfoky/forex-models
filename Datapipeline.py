@@ -12,10 +12,31 @@ from ta.volatility import BollingerBands
 from ta.trend import MACD
 from ta.momentum import RSIIndicator
 
-import numpy as np
-from sklearn.preprocessing import MinMaxScaler
-# In[61]:
+import pandas as pd
+import torch
+import torch.nn as nn
+import torch.optim as optim
+from sklearn.model_selection import train_test_split
+from sklearn.preprocessing import StandardScaler
+from keras.models import load_model
 
+from torch.utils.data import DataLoader, TensorDataset
+import torch.optim as optim
+class Net(nn.Module):
+    def __init__(self):
+        super(Net, self).__init__()
+        self.fc1 = nn.Linear(5, 64)
+        self.fc2 = nn.Linear(64, 32)
+        self.fc3 = nn.Linear(32, 2)
+
+    def forward(self, x):
+        x = torch.relu(self.fc1(x))
+        x = torch.relu(self.fc2(x))
+        x = self.fc3(x)
+        return x
+# Normalize the data
+scaler_x = StandardScaler()
+scaler_y = StandardScaler()
 
 # df.to_csv('btcusd.csv', index=False)
 
@@ -25,8 +46,8 @@ from sklearn.preprocessing import MinMaxScaler
 # In[3]:
 
 
-def get_data(symbol):
-    # Getting data on the 1 hour timeframe
+def get_data(symbol, date_time=datetime.today()):
+    # Getting data on the 1-hour timeframe
     if not mt5.initialize():
         print("initialize() failed, error code =", mt5.last_error())
         quit()
@@ -36,10 +57,10 @@ def get_data(symbol):
 
     # dates for retrieving the history
     date_from = datetime(2019, 12, 15)
-    today = datetime.today()
+    date_to = date_time
 
     # get the history
-    history = mt5.copy_rates_range(symbol, timeframe, date_from, today)
+    history = mt5.copy_rates_range(symbol, timeframe, date_from, date_to)
 
     if history is not None and len(history) > 0:
         # create DataFrame out of the obtained data
@@ -103,36 +124,62 @@ def add_required_indicators(data):
     pd.set_option('display.max_columns', None)
     return data
 
-def scale_data(data_set):
-    sc = MinMaxScaler(feature_range=(0, 1))
-    data_set_scaled = sc.fit_transform(data_set)
-    return data_set_scaled
 
+def get_HnL_Predictions(data):
+    # Create a copy of the data to avoid modifying the original DataFrame
+    data_copy = data.copy()
 
-def prepare_realtime_data(new_data_set_scaled,  backcandles=30, feature_count=8):
-    """
-    Prepare real-time data for making predictions based on how the training data was preprocessed.
+    data_copy['hightarget'] = data_copy['high'].shift(-1)
+    data_copy['lowtarget'] = data_copy['low'].shift(-1)
 
-    Parameters:
-    - new_data_set: DataFrame or 2D array-like, the new real-time data
-    - sc: trained MinMaxScaler object
-    - backcandles: int, the number of past records to use for each sequence
-    - feature_count: int, the number of features in the data set
+    # Drop rows containing NaN values
+    data_copy.dropna(inplace=True)
 
-    Returns:
-    - X_new: 3D numpy array, preprocessed real-time data suitable for predictions
-    """
+    X = data_copy[['open', 'high', 'low', 'close', 'tick_volume']]
+    y = data_copy[['hightarget', 'lowtarget']]
 
-    # Step 1: Use the same MinMaxScaler to scale new data
-    # Step 2: Create sequences (like rolling window) of last 'backcandles' records
-    X_new = []
+    # Initialize the scalers
+    scaler_x = StandardScaler()
+    scaler_y = StandardScaler()
 
-    for j in range(feature_count):  # Number of feature columns
-        X_new.append([])
-        for i in range(backcandles, new_data_set_scaled.shape[0]):
-            X_new[j].append(new_data_set_scaled[i - backcandles:i, j])
+    # Fit and transform the scalers
+    scaler_x.fit(X)
+    scaler_y.fit(y)
 
-    # Step 3: Reshape data
-    X_new = np.moveaxis(X_new, [0], [2])
+    X_scaled = scaler_x.transform(X)
+    y_scaled = scaler_y.transform(y)
 
-    return X_new
+    # Transform only the necessary columns for new_data_scaled
+    new_data_scaled = scaler_x.transform(data_copy.tail(30)[['open', 'high', 'low', 'close', 'tick_volume']])
+    new_data_tensor = torch.tensor(new_data_scaled, dtype=torch.float32)
+
+    # Initialize the model architecture
+    model = Net()
+
+    # Load the saved state dictionary into the model
+    model.load_state_dict(torch.load('high_and_lows.pth'))
+
+    model.eval()
+    with torch.no_grad():
+        future_pred_scaled = model(new_data_tensor).numpy()
+
+    # Inverse transform to get original values
+    new_HnL_prediction = scaler_y.inverse_transform(future_pred_scaled)
+
+    return new_HnL_prediction
+
+def getModelPredictions(data):
+    # Create a copy of the data to avoid modifying the original DataFrame
+    data_copy = data.copy()
+
+    data_copy['hightarget'] = data_copy['high'].shift(-1)
+    data_copy['lowtarget'] = data_copy['low'].shift(-1)
+
+    # Drop rows containing NaN values
+    data_copy.dropna(inplace=True)
+
+    X = data_copy[['open', 'high', 'low', 'close', 'tick_volume']]
+    y = data_copy[['hightarget', 'lowtarget']]
+
+    model = load_model('trained_model.keras')
+
